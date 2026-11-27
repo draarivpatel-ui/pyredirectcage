@@ -12,6 +12,8 @@ from .errors import RedirectCageError
 
 
 def _positive_int(text: str) -> int:
+    if not text or any(char < "0" or char > "9" for char in text):
+        raise argparse.ArgumentTypeError("must be an integer")
     try:
         value = int(text)
     except ValueError:

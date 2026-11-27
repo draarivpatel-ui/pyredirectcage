@@ -15,6 +15,7 @@ Relative same-origin paths are allowed by default. Absolute HTTP and HTTPS URLs 
 - `javascript:`, `data:`, `vbscript:`, `file:`, `blob:`, `about:`, extension schemes, and other non-HTTP schemes are never valid redirect targets. Only `http` and `https` can be allowlisted, and absolute URLs require exact `scheme://authority` syntax.
 - Userinfo authority spoofing such as `https://trusted.example@evil.example/` is rejected by default.
 - IPv4 and IPv6 literal redirect hosts are rejected by default. Legacy IPv4 spellings such as decimal integers, octal forms, hexadecimal forms, and shorthand forms are canonicalized before policy matching.
+- Raw non-ASCII host labels fail closed. Use ASCII punycode (`xn--`) in redirect targets and allowlists so host behavior stays deterministic across Python versions and URL parsers.
 - Allowlist matching is exact. Optional subdomain matching requires a dot boundary, so `eviltrusted.example` and `trusted.example.evil` do not match `trusted.example`.
 - Trailing-dot hostnames are distinct and do not match the corresponding non-trailing-dot allowlist entry.
 - `allowed_origins` entries must be pure origins. Hidden paths, queries, fragments, userinfo, and dot-path syntax are rejected at configuration time.
@@ -30,7 +31,7 @@ pyredirectcage does not fetch URLs, resolve DNS, follow redirect chains, or deci
 
 `blocked_paths` is a URL-path policy, not a framework-specific route matcher. Frameworks that decode or normalize paths in a different order can have additional routing behavior that a static URL library cannot observe.
 
-The host parser is intentionally strict about empty domain labels, malformed numeric forms, IPv6 zone identifiers, port zero, empty userinfo, and non-ASCII dot separators that Python's standard IDNA codec does not accept. Those inputs fail closed even when a particular browser parser has a more permissive compatibility behavior.
+The host parser is intentionally strict about empty domain labels, malformed numeric forms, IPv6 zone identifiers, port zero, empty userinfo, Unicode digits, and non-ASCII dot separators. Raw non-ASCII host labels are rejected because Python's standard IDNA codec is not deterministic across the supported Python versions and does not match browser URL processing for compatibility-edge characters. Use the ASCII punycode form of an internationalized domain instead. Those inputs fail closed even when a particular browser parser has a more permissive compatibility behavior.
 
 The library validates one target string. Applications remain responsible for using the returned canonical value and for not concatenating it with unvalidated data.
 
@@ -161,7 +162,7 @@ location = sanitize_redirect(
 )
 ```
 
-A blocked entry matches the exact path and descendants. `/admin` matches `/admin` and `/admin/panel`, not `/administrator`. A trailing slash is significant. Matching is case sensitive after canonical percent-triplet casing and bounded decoding. Dot segments are normalized before comparison.
+A blocked entry matches the exact path and descendants. `/admin` matches `/admin` and `/admin/panel`, not `/administrator`. A trailing slash is significant. Matching is case sensitive after canonical percent-triplet casing and bounded decoding. Percent-encoded blocked entries are decoded through the same bounded layers as targets, so `/a%64min` blocks `/admin`. Entries that decode to a query, fragment, backslash, control character, or authority-relative path are invalid configuration. Dot segments are normalized before comparison.
 
 A fallback inside a blocked path is rejected at configuration time. Choose a fallback outside the blocked subtree.
 
@@ -235,7 +236,7 @@ Every unsafe target has a stable machine-readable code beginning with `ERR_REDIR
 
 ## Test evidence and development
 
-The offline unittest suite currently contains 504 real deterministic tests. They cover OWASP CWE-601 vectors, parser canonicalization, invalid UTF-8 and overlong encodings, nested percent encoding, Unicode normalization, host and port edge cases, IPv4 and IPv6 literals, strict allowlist boundaries, redirect-loop paths, policy validation, WSGI and ASGI helpers, CLI behavior, typing exports, and repository hygiene. All 504 tests passed in the local verification run for this commit.
+The offline unittest suite currently contains 528 real deterministic tests. They cover OWASP CWE-601 vectors, parser canonicalization, invalid UTF-8 and overlong encodings, nested percent encoding, Unicode normalization, host and port edge cases, IPv4 and IPv6 literals, strict allowlist boundaries, redirect-loop paths, policy validation, WSGI and ASGI helpers, CLI behavior, typing exports, and repository hygiene. All 528 tests passed in the local verification run for this commit.
 
 Run the suite with:
 

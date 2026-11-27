@@ -29,6 +29,7 @@ Every change must keep the suite green using Python 3.9 syntax. No third-party t
 - Keep nested percent-decoding bounded.
 - Reject hidden path, query, fragment, and userinfo syntax in `allowed_origins`.
 - Treat trailing-dot hostnames as distinct for allowlist matching.
+- Keep host and numeric canonicalization deterministic across supported Python versions.
 - Keep allowlist subdomain matching behind a strict dot boundary.
 - Add regression tests for every validation rule or bug fix.
 - Prefer explicit opt-in for unsafe compatibility behavior.

@@ -147,6 +147,10 @@ class ModuleCliTests(unittest.TestCase):
         completed = run_module("inspect", "/x", "--max-length", "abc")
         self.assertEqual(2, completed.returncode)
 
+    def test_unicode_numeric_option_is_argparse_error(self):
+        completed = run_module("inspect", "/x", "--max-length", "٤")
+        self.assertEqual(2, completed.returncode)
+
     def test_unknown_cli_option_is_argparse_error(self):
         completed = run_module("inspect", "/x", "--unknown")
         self.assertEqual(2, completed.returncode)

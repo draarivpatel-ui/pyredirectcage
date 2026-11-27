@@ -73,6 +73,8 @@ HOST_CONFIG_ROWS = [
     "example..com",
     "example com",
     "example\\com",
+    "éxample.com",
+    "faß.de",
     "example.com:0",
     "example.com:65536",
     "example.com:abc",
@@ -109,6 +111,9 @@ BLOCKED_CONFIG_ROWS = [
     "/admin%2",
     "/admin%zz",
     "/admin%ff",
+    "/admin%3f",
+    "/admin%23",
+    "/%2fadmin",
     "/ad min",
     "/admin\ry",
 ]
@@ -231,6 +236,13 @@ class PolicyValidationTests(unittest.TestCase):
     def test_fallback_is_canonicalized_at_config_time(self):
         policy = RedirectPolicy(fallback="/a/../home")
         self.assertEqual("/home", policy.fallback)
+
+    def test_fallback_inside_percent_encoded_blocked_path_is_config_error(self):
+        assert_config_error(
+            self,
+            {"fallback": "/admin", "blocked_paths": ["/a%64min"]},
+            "fallback",
+        )
 
     def test_absolute_fallback_is_allowed_only_by_policy(self):
         policy = RedirectPolicy(

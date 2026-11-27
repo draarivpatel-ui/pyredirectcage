@@ -49,9 +49,11 @@ MAX_DECODE_LAYER_LIMIT = 16
 _SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):")
 _VALID_PERCENT_RE = re.compile(r"%[0-9a-fA-F]{2}")
 _PERCENT_TRIPLET_RE = re.compile(r"%[0-9a-fA-F]{2}")
-_IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+_IPV4_RE = re.compile(r"^[0-9]{1,3}(?:\.[0-9]{1,3}){3}$")
 _DOMAIN_ASCII_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-_PORT_RE = re.compile(r"^\d+$")
+_ASCII_RAW_FORBIDDEN_RE = re.compile(r"[\x00-\x20\x7f]")
+_ASCII_DECODED_FORBIDDEN_RE = re.compile(r"[\x00-\x1f\x7f]")
+_IPV4_NUMERIC_LIMIT = 256 ** 4
 
 _HARD_BLOCKED_SCHEMES = frozenset(
     (
@@ -100,6 +102,11 @@ _SUB_DELIMS = "!$&'()*+,;="
 _PATH_SAFE = _UNRESERVED + _SUB_DELIMS + ":@/"
 _QUERY_SAFE = _UNRESERVED + _SUB_DELIMS + ":@/?"
 _USERINFO_SAFE = _UNRESERVED + _SUB_DELIMS
+_SAFE_CHARACTER_SETS = {
+    _PATH_SAFE: frozenset(_PATH_SAFE),
+    _QUERY_SAFE: frozenset(_QUERY_SAFE),
+    _USERINFO_SAFE: frozenset(_USERINFO_SAFE),
+}
 
 _KNOWN_OPTION_KEYS = frozenset(
     (
@@ -273,14 +280,12 @@ def _success(
     query: Optional[str],
     fragment: Optional[str],
 ) -> RedirectInspection:
-    for char in normalized:
-        codepoint = ord(char)
-        if codepoint < 0x20 or codepoint > 0x7E:
-            return _failure(
-                input,
-                CONTROL_CHARACTER,
-                "canonical redirect output is not printable ASCII",
-            )
+    if not normalized.isascii() or not normalized.isprintable():
+        return _failure(
+            input,
+            CONTROL_CHARACTER,
+            "canonical redirect output is not printable ASCII",
+        )
     return RedirectInspection(
         input=input,
         safe=True,
@@ -348,21 +353,82 @@ def _utf8_bytes_for_char(char: str) -> bytes:
     return char.encode("utf-8")
 
 
-def _decode_percent_layer(value: str) -> _DecodeResult:
-    if "%" not in value:
-        return _DecodeResult(value=value, changed=False, invalid_utf8=False)
+def _utf8_bytes_for_text(value: str) -> bytes:
+    try:
+        return value.encode("utf-8")
+    except UnicodeEncodeError:
+        output = bytearray()
+        for char in value:
+            output.extend(_utf8_bytes_for_char(char))
+        return bytes(output)
+
+
+def _hex_byte_value(byte: int) -> int:
+    if 48 <= byte <= 57:
+        return byte - 48
+    if 65 <= byte <= 70:
+        return byte - 55
+    if 97 <= byte <= 102:
+        return byte - 87
+    return -1
+
+
+def _decode_ascii_percent_layer(value: str) -> _DecodeResult:
+    data = value.encode("ascii")
     output = bytearray()
     changed = False
     index = 0
-    while index < len(value):
-        encoded_byte = _percent_byte_at(value, index)
+    end = len(data)
+    while index < end:
+        percent_index = data.find(b"%", index)
+        if percent_index == -1:
+            output.extend(data[index:])
+            break
+        output.extend(data[index:percent_index])
+        encoded_byte = -1
+        if percent_index + 2 < end:
+            high = _hex_byte_value(data[percent_index + 1])
+            low = _hex_byte_value(data[percent_index + 2])
+            if high != -1 and low != -1:
+                encoded_byte = high * 16 + low
         if encoded_byte != -1:
             output.append(encoded_byte)
             changed = True
-            index += 3
-            continue
-        output.extend(_utf8_bytes_for_char(value[index]))
-        index += 1
+            index = percent_index + 3
+        else:
+            output.append(0x25)
+            index = percent_index + 1
+    try:
+        decoded = bytes(output).decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        return _DecodeResult(value=None, changed=changed, invalid_utf8=True)
+    return _DecodeResult(value=decoded, changed=changed, invalid_utf8=False)
+
+
+def _decode_percent_layer(value: str) -> _DecodeResult:
+    if "%" not in value:
+        return _DecodeResult(value=value, changed=False, invalid_utf8=False)
+    if value.isascii():
+        return _decode_ascii_percent_layer(value)
+    output = bytearray()
+    changed = False
+    index = 0
+    end = len(value)
+    while index < end:
+        percent_index = value.find("%", index)
+        if percent_index == -1:
+            output.extend(_utf8_bytes_for_text(value[index:]))
+            break
+        if percent_index > index:
+            output.extend(_utf8_bytes_for_text(value[index:percent_index]))
+        encoded_byte = _percent_byte_at(value, percent_index)
+        if encoded_byte != -1:
+            output.append(encoded_byte)
+            changed = True
+            index = percent_index + 3
+        else:
+            output.append(0x25)
+            index = percent_index + 1
     try:
         decoded = bytes(output).decode("utf-8", "strict")
     except UnicodeDecodeError:
@@ -408,6 +474,8 @@ def _decoded_forbidden(char: str) -> bool:
 
 
 def _scan_unicode_hazards(value: str) -> Optional[Tuple[str, str]]:
+    if value.isascii():
+        return None
     compat = unicodedata.normalize("NFKC", value)
     if compat == value:
         return None
@@ -441,8 +509,13 @@ def _scan_unicode_hazards(value: str) -> Optional[Tuple[str, str]]:
 
 
 def _scan_variant(value: str, original: bool) -> Optional[Tuple[str, str]]:
-    forbidden = _raw_forbidden if original else _decoded_forbidden
-    if any(forbidden(char) for char in value):
+    if value.isascii():
+        pattern = _ASCII_RAW_FORBIDDEN_RE if original else _ASCII_DECODED_FORBIDDEN_RE
+        has_forbidden = pattern.search(value) is not None
+    else:
+        forbidden = _raw_forbidden if original else _decoded_forbidden
+        has_forbidden = any(forbidden(char) for char in value)
+    if has_forbidden:
         return (
             CONTROL_CHARACTER,
             "raw whitespace, control or invisible characters are not allowed"
@@ -596,6 +669,10 @@ def _split_suffix(suffix: str) -> Tuple[str, bool, str, bool, str]:
 
 
 def _percent_canonicalize(value: str, safe_characters: str) -> str:
+    if "%" not in value and value.isascii():
+        safe_set = _SAFE_CHARACTER_SETS.get(safe_characters)
+        if safe_set is not None and set(value) <= safe_set:
+            return value
     output: List[str] = []
     index = 0
     while index < len(value):
@@ -629,6 +706,20 @@ def _canonicalize_userinfo(value: str) -> str:
     return _percent_canonicalize(value, _USERINFO_SAFE) + "@"
 
 
+def _is_ascii_digit(char: str) -> bool:
+    return "0" <= char <= "9"
+
+
+def _accumulate_ipv4_digits(digits: str, base: int) -> int:
+    value = 0
+    for char in digits:
+        digit = _hex_value(char) if base == 16 else ord(char) - 48
+        value = value * base + digit
+        if value >= _IPV4_NUMERIC_LIMIT:
+            return _IPV4_NUMERIC_LIMIT
+    return value
+
+
 def _ipv4_number(part: str) -> Tuple[bool, Optional[int]]:
     if part == "":
         return True, None
@@ -638,16 +729,16 @@ def _ipv4_number(part: str) -> Tuple[bool, Optional[int]]:
         if digits == "":
             return True, 0
         if all(char in "0123456789abcdefABCDEF" for char in digits):
-            return True, int(digits, 16)
+            return True, _accumulate_ipv4_digits(digits, 16)
         return False, None
     if len(part) > 1 and part.startswith("0"):
         if all(char in "01234567" for char in part):
-            return True, int(part, 8)
-        if part.isdigit():
+            return True, _accumulate_ipv4_digits(part, 8)
+        if all(_is_ascii_digit(char) for char in part):
             return True, None
         return False, None
-    if part.isdigit():
-        return True, int(part, 10)
+    if all(_is_ascii_digit(char) for char in part):
+        return True, _accumulate_ipv4_digits(part, 10)
     return False, None
 
 
@@ -705,6 +796,8 @@ def _canonicalize_domain_or_ipv4(host: str) -> Tuple[str, bool]:
     decoded = _decode_host_percent_once(host)
     if decoded == "":
         raise _UrlError("host is empty")
+    if any(ord(char) > 0x7F for char in decoded):
+        raise _UrlError("host labels must be ASCII or punycode")
     ipv4 = _canonicalize_ipv4(decoded)
     if ipv4 is not _NOT_IPV4:
         return ipv4, True
@@ -718,10 +811,7 @@ def _canonicalize_domain_or_ipv4(host: str) -> Tuple[str, bool]:
         raise _UrlError("host contains an empty label")
     ascii_labels: List[str] = []
     for label in labels:
-        try:
-            ascii_label = label.encode("idna").decode("ascii").lower()
-        except (UnicodeError, UnicodeDecodeError) as exc:
-            raise _UrlError("host is not a valid internationalized domain name") from exc
+        ascii_label = label.lower()
         if not ascii_label or len(ascii_label) > 63:
             raise _UrlError("host label length is invalid")
         if _DOMAIN_ASCII_RE.fullmatch(ascii_label) is None:
@@ -738,16 +828,44 @@ def _canonicalize_domain_or_ipv4(host: str) -> Tuple[str, bool]:
 def _parse_port(port_text: Optional[str], label: str) -> Optional[int]:
     if port_text is None or port_text == "":
         return None
-    if _PORT_RE.fullmatch(port_text) is None:
-        raise _UrlError(label + " is not decimal digits")
-    port = int(port_text, 10)
-    if port < 1 or port > 65535:
+    port = 0
+    for char in port_text:
+        if not _is_ascii_digit(char):
+            raise _UrlError(label + " is not decimal digits")
+        port = port * 10 + ord(char) - 48
+        if port > 65535:
+            raise _UrlError(label + " must be between 1 and 65535")
+    if port < 1:
         raise _UrlError(label + " must be between 1 and 65535")
     return port
 
 
 def _default_port(protocol: str) -> int:
     return 443 if protocol == "https" else 80
+
+
+def _canonical_ipv6_text(ipv6: ipaddress.IPv6Address) -> str:
+    groups = [int.from_bytes(ipv6.packed[index : index + 2], "big") for index in range(0, 16, 2)]
+    best_start = -1
+    best_length = 0
+    index = 0
+    while index < 8:
+        if groups[index] != 0:
+            index += 1
+            continue
+        start = index
+        while index < 8 and groups[index] == 0:
+            index += 1
+        length = index - start
+        if length > best_length:
+            best_start = start
+            best_length = length
+    hex_groups = [format(group, "x") for group in groups]
+    if best_length < 2:
+        return ":".join(hex_groups)
+    left = ":".join(hex_groups[:best_start])
+    right = ":".join(hex_groups[best_start + best_length :])
+    return left + "::" + right
 
 
 def _parse_authority(authority: str, protocol: str) -> _Authority:
@@ -775,7 +893,7 @@ def _parse_authority(authority: str, protocol: str) -> _Authority:
             ipv6 = ipaddress.IPv6Address(ipv6_text)
         except ValueError as exc:
             raise _UrlError("IPv6 literal is invalid") from exc
-        hostname = "[" + str(ipv6) + "]"
+        hostname = "[" + _canonical_ipv6_text(ipv6) + "]"
         rest = hostport_text[close + 1 :]
         if rest:
             if not rest.startswith(":"):
@@ -927,6 +1045,10 @@ def _validate_blocked_path_decoding(value: str) -> None:
             _config_error("blocked_paths entry percent-decodes to control or invisible characters", value)
         if "\\" in current:
             _config_error("blocked_paths entry percent-decodes to a backslash", value)
+        if "?" in current or "#" in current:
+            _config_error("blocked_paths entry percent-decodes to a query or fragment", value)
+        if _leading_slash_count(current) != 1:
+            _config_error("blocked_paths entry percent-decodes to an authority-relative path", value)
 
 
 def _canonicalize_blocked_path(value: str) -> str:
@@ -1173,9 +1295,29 @@ def _decoded_path_variants(pathname: str, config: Any) -> List[str]:
     return variants
 
 
+def _blocked_entry_variants(blocked: str, config: Any) -> Tuple[str, ...]:
+    variants: List[str] = []
+    seen = set()
+    for variant in _decoded_path_variants(blocked, config):
+        normalized = _uppercase_percent_triplets(_normalize_path(variant))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        variants.append(normalized)
+    return tuple(variants)
+
+
 def _blocked_path_failure(input: str, pathname: str, config: Any) -> Optional[RedirectInspection]:
     if not config.blocked_paths:
         return None
+    blocked_variants: List[str] = []
+    seen_blocked = set()
+    for blocked in config.blocked_paths:
+        for variant in _blocked_entry_variants(blocked, config):
+            if variant in seen_blocked:
+                continue
+            seen_blocked.add(variant)
+            blocked_variants.append(variant)
     for variant in _decoded_path_variants(pathname, config):
         structural_path = variant
         end = len(structural_path)
@@ -1188,7 +1330,7 @@ def _blocked_path_failure(input: str, pathname: str, config: Any) -> Optional[Re
         structural_path = structural_path[:end]
         if structural_path.startswith("/"):
             structural_path = _uppercase_percent_triplets(_normalize_path(structural_path))
-        for blocked in config.blocked_paths:
+        for blocked in blocked_variants:
             if _paths_match(blocked, structural_path):
                 return _failure(input, BLOCKED_PATH, "redirect path is blocked by policy")
     return None

@@ -69,13 +69,13 @@ ABSOLUTE_ACCEPT_ROWS = [
         "https://example.com/x",
     ),
     (
-        "https://éxample.com/x",
+        "https://xn--xample-9ua.com/x",
         {"allowed_hosts": ["xn--xample-9ua.com"]},
         "https://xn--xample-9ua.com/x",
     ),
     (
-        "https://xn--xample-9ua.com/x",
-        {"allowed_hosts": ["éxample.com"]},
+        "https://XN--XAMPLE-9UA.COM/x",
+        {"allowed_hosts": ["xn--xample-9ua.com"]},
         "https://xn--xample-9ua.com/x",
     ),
     (
@@ -190,6 +190,15 @@ ABSOLUTE_REJECT_ROWS = [
     ("https://trusted.example/x%23f", {"allowed_hosts": ["trusted.example"], "allow_hash": False}, "HASH_NOT_ALLOWED"),
     ("https://trusted.example/a/./b", {"allowed_hosts": ["trusted.example"], "normalize_dot_segments": False}, "DOT_SEGMENT"),
     ("https://trusted.example/a/%2e/b", {"allowed_hosts": ["trusted.example"], "normalize_dot_segments": False}, "DOT_SEGMENT"),
+    ("https://éxample.com/x", {"allowed_hosts": ["xn--xample-9ua.com"]}, "INVALID_URL"),
+    ("https://fass.de/x", {"allowed_hosts": ["xn--fa-hia.de"]}, "HOST_NOT_ALLOWED"),
+    ("https://faß.de/x", {"allowed_hosts": ["xn--fa-hia.de"]}, "INVALID_URL"),
+    ("https://ς.gr/x", {"allowed_hosts": ["xn--3xa.gr"]}, "INVALID_URL"),
+    ("https://ꭲ.com/x", {"allowed_hosts": ["xn--78d.com"]}, "INVALID_URL"),
+    ("https://١٢٣/x", {"allowed_hosts": ["0.0.0.123"], "allow_ip_literals": True}, "INVALID_URL"),
+    ("https://１２３/x", {"allowed_hosts": ["0.0.0.123"], "allow_ip_literals": True}, "INVALID_URL"),
+    ("https://trusted.example:٤٤٣/x", {"allowed_hosts": ["trusted.example"]}, "INVALID_URL"),
+    ("https://trusted.example:４４３/x", {"allowed_hosts": ["trusted.example"]}, "INVALID_URL"),
 ]
 
 
@@ -277,6 +286,20 @@ class BlockedPathMatrixTests(unittest.TestCase):
 add_matrix_tests(BlockedPathMatrixTests, "blocked", BLOCKED_ROWS, _check_blocked)
 
 
+class EncodedBlockedPathPolicyTests(unittest.TestCase):
+    def test_percent_encoded_blocked_entry_matches_decoded_target(self):
+        assert_rejected(self, "/admin", CODE["BLOCKED_PATH"], blocked_paths=["/a%64min"])
+
+    def test_double_encoded_blocked_entry_matches_decoded_target(self):
+        assert_rejected(self, "/admin", CODE["BLOCKED_PATH"], blocked_paths=["/%2561dmin"])
+
+    def test_encoded_slash_in_blocked_entry_matches_decoded_descendant(self):
+        assert_rejected(self, "/admin/panel", CODE["BLOCKED_PATH"], blocked_paths=["/admin%2fpanel"])
+
+    def test_plain_blocked_entry_still_matches_encoded_target(self):
+        assert_rejected(self, "/a%64min", CODE["BLOCKED_PATH"], blocked_paths=["/admin"])
+
+
 class AbsoluteMetadataTests(unittest.TestCase):
     def test_absolute_inspection_metadata(self):
         result = assert_accepted(
@@ -339,6 +362,43 @@ class AbsoluteMetadataTests(unittest.TestCase):
         second = parse_redirect_location(first, **options)
         self.assertTrue(second.safe)
         self.assertEqual(first, second.normalized)
+
+
+class ParserDifferentialRegressionTests(unittest.TestCase):
+    def test_percent_encoded_non_ascii_host_fails_closed(self):
+        assert_rejected(
+            self,
+            "https://%C3%A9xample.com/x",
+            CODE["INVALID_URL"],
+            allowed_hosts=["xn--xample-9ua.com"],
+        )
+
+    def test_numeric_host_with_thousands_of_digits_is_invalid_without_unhandled_exception(self):
+        assert_rejected(
+            self,
+            "https://" + "9" * 5000 + "/x",
+            CODE["INVALID_URL"],
+            allowed_hosts=["trusted.example"],
+            allow_ip_literals=True,
+            max_length=10000,
+        )
+
+    def test_port_with_thousands_of_digits_is_invalid_without_unhandled_exception(self):
+        assert_rejected(
+            self,
+            "https://trusted.example:" + "9" * 5000 + "/x",
+            CODE["INVALID_URL"],
+            allowed_hosts=["trusted.example"],
+            max_length=10000,
+        )
+
+    def test_zero_padded_port_keeps_browser_compatible_default_port_semantics(self):
+        assert_accepted(
+            self,
+            "https://trusted.example:" + "0" * 100 + "443/x",
+            "https://trusted.example/x",
+            allowed_hosts=["trusted.example"],
+        )
 
 
 if __name__ == "__main__":
